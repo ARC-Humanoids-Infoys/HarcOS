@@ -1,0 +1,94 @@
+"""
+run.py
+------
+HarcOS entry point — start an MCP server for a given robot.
+
+Usage:
+    python run.py go2                     # Go2 on stdio (Claude Desktop)
+    python run.py go2 --ip 192.168.1.100 # Go2 with specific IP
+    python run.py go2 --transport sse --port 9990  # HTTP SSE server
+
+    python run.py g1                      # G1 on stdio
+    python run.py g1 --interface eth0     # G1 with specific network interface
+    python run.py g1 --transport sse --port 9991   # G1 on port 9991
+
+Pattern mirrors `dimos run <blueprint>`.
+"""
+
+import argparse
+import sys
+
+from registry import BLUEPRINTS
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="run.py",
+        description="HarcOS — Start a robot MCP server",
+    )
+    parser.add_argument(
+        "robot",
+        choices=list(BLUEPRINTS.keys()),
+        help="Robot blueprint to run: go2, g1, etc.",
+    )
+    parser.add_argument(
+        "--ip",
+        default=None,
+        help="Robot IP address (overrides ROBOT_IP / G1_ROBOT_IP env var)",
+    )
+    parser.add_argument(
+        "--interface",
+        default=None,
+        dest="network_interface",
+        help="Network interface for G1 DDS (overrides G1_NETWORK_INTERFACE env var)",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "sse"],
+        default="stdio",
+        help="MCP transport: stdio (Claude Desktop) or sse (HTTP server)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=9990,
+        help="HTTP port when --transport sse (default: 9990)",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    build_fn = BLUEPRINTS[args.robot]
+
+    # Prepare kwargs for the blueprint builder
+    build_kwargs = {}
+    if args.ip:
+        build_kwargs["ip"] = args.ip
+    if args.network_interface:
+        build_kwargs["network_interface"] = args.network_interface
+
+    print(f"[HarcOS] Starting blueprint: {args.robot}", file=sys.stderr)
+
+    try:
+        mcp, _controller = build_fn(**build_kwargs)
+    except Exception as e:
+        print(f"[HarcOS] Failed to build blueprint: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[HarcOS] Blueprint built. Starting MCP server...", file=sys.stderr)
+
+    if args.transport == "sse":
+        print(
+            f"[HarcOS] SSE server listening on http://localhost:{args.port}/sse",
+            file=sys.stderr,
+        )
+        mcp.run(transport="sse", host="0.0.0.0", port=args.port)
+    else:
+        print(f"[HarcOS] Stdio mode (Claude Desktop compatible)", file=sys.stderr)
+        mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
