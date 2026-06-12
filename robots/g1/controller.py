@@ -206,32 +206,6 @@ class G1Controller(RobotController):
         self._low_state_sub = None
         self._latest_low_state = None
 
-    def move(
-        self, x: float = 0.0, y: float = 0.0, yaw: float = 0.0, duration: float = 0.0
-    ) -> bool:
-        """Send velocity command via G1 LocoClient."""
-        if not self._connected or self._loco_client is None:
-            return False
-        try:
-            if duration > 0:
-                code = self._loco_client.SetVelocity(x, y, yaw, duration)
-                if code != 0:
-                    return False
-            else:
-                self._loco_client.Move(x, y, yaw, continous_move=True)
-            return True
-        except Exception:
-            return False
-
-    def stop(self) -> None:
-        """Stop G1 movement."""
-        if not self._connected or self._loco_client is None:
-            return
-        try:
-            self._loco_client.StopMove()
-        except Exception:
-            pass
-
     def get_battery(self) -> dict | str:
         """Get G1 battery state.
         
@@ -259,57 +233,6 @@ class G1Controller(RobotController):
         except Exception as e:
             return f"Failed to read G1 battery: {e}"
 
-    def get_pose(self) -> dict | str:
-        """Get G1 pose estimate from low-state IMU (minimal)."""
-        if not self._connected:
-            return "Not connected"
-
-        state = self._require_low_state()
-        if isinstance(state, str):
-            return state
-
-        try:
-            imu = state.imu_state
-            yaw = imu.rpy[2] if len(imu.rpy) >= 3 else None
-            return {
-                "position": {
-                    "x": None,
-                    "y": None,
-                    "z": None,
-                },
-                "orientation": {
-                    "yaw_rad": round(yaw, 6) if yaw is not None else None,
-                    "yaw_deg": round(yaw * 57.2958, 3) if yaw is not None else None,
-                },
-            }
-        except Exception as e:
-            return f"Failed to read G1 pose: {e}"
-
-    # ------------------------------------------------------------------
-    # G1-specific posture commands (mirroring DimOS execute_*_command)
-    # ------------------------------------------------------------------
-
-    def stand_up(self) -> str:
-        """Command G1 to stand up."""
-        if not self._connected or self._loco_client is None:
-            return "Not connected"
-        try:
-            # DimOS uses SQUAT_STANDUP_TOGGLE FSM (706) in high-level DDS control.
-            self._loco_client.SetFsmId(706)
-            return "G1 standing up"
-        except Exception as e:
-            return f"StandUp failed: {e}"
-
-    def stand_down(self) -> str:
-        """Command G1 to stand down (sit)."""
-        if not self._connected or self._loco_client is None:
-            return "Not connected"
-        try:
-            # Sit FSM
-            self._loco_client.SetFsmId(3)
-            return "G1 standing down"
-        except Exception as e:
-            return f"StandDown failed: {e}"
 
     # ------------------------------------------------------------------
     # Internal helpers

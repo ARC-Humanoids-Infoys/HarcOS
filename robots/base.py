@@ -40,34 +40,6 @@ class RobotController(ABC):
         ...
 
     # ------------------------------------------------------------------
-    # Motion
-    # ------------------------------------------------------------------
-
-    @abstractmethod
-    def move(
-        self,
-        x: float = 0.0,
-        y: float = 0.0,
-        yaw: float = 0.0,
-        duration: float = 0.0,
-    ) -> bool:
-        """
-        Send a velocity command.
-
-        Args:
-            x:        forward (+) / backward (-) velocity in m/s
-            y:        left (+) / right (-) velocity in m/s
-            yaw:      counter-clockwise (+) angular velocity in rad/s
-            duration: seconds to hold the command (0 = single shot)
-        """
-        ...
-
-    @abstractmethod
-    def stop(self) -> None:
-        """Immediately zero all velocity commands."""
-        ...
-
-    # ------------------------------------------------------------------
     # Telemetry
     # ------------------------------------------------------------------
 
@@ -76,14 +48,5 @@ class RobotController(ABC):
         """
         Return battery state.
         Must include at minimum: {"soc_percent": float, "voltage_v": float}
-        """
-        ...
-
-    @abstractmethod
-    def get_pose(self) -> dict | str:
-        """
-        Return current robot pose.
-        Must include at minimum:
-          {"position": {"x": float, "y": float}, "orientation": {"yaw_rad": float}}
         """
         ...
