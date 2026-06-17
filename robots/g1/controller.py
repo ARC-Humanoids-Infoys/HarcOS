@@ -235,8 +235,125 @@ class G1Controller(RobotController):
 
 
     # ------------------------------------------------------------------
+    # Posture & locomotion
+    # ------------------------------------------------------------------
+
+    def stand_up(self) -> str:
+        """Command G1 to stand up."""
+        err = self._require_connected()
+        if err:
+            return err
+        try:
+            self._loco_client.StandUp()
+            return "Standing up"
+        except Exception as e:
+            return f"stand_up failed: {type(e).__name__}: {e}"
+
+    def stand_down(self) -> str:
+        """Command G1 to stand down / sit."""
+        err = self._require_connected()
+        if err:
+            return err
+        try:
+            self._loco_client.StandDown()
+            return "Standing down"
+        except Exception as e:
+            return f"stand_down failed: {type(e).__name__}: {e}"
+
+    def move(self, vx: float, vy: float, vyaw: float) -> str:
+        """Send a continuous velocity command to G1.
+
+        Args:
+            vx:   Forward (+) / backward (-) velocity in m/s.
+            vy:   Left (+) / right (-) lateral velocity in m/s.
+            vyaw: Counter-clockwise (+) yaw rate in rad/s.
+        """
+        err = self._require_connected()
+        if err:
+            return err
+        try:
+            self._loco_client.Move(vx, vy, vyaw)
+            return f"Moving: vx={vx} m/s, vy={vy} m/s, vyaw={vyaw} rad/s"
+        except Exception as e:
+            return f"move failed: {type(e).__name__}: {e}"
+
+    def stop(self) -> str:
+        """Stop all G1 movement."""
+        err = self._require_connected()
+        if err:
+            return err
+        try:
+            self._loco_client.StopMove()
+            return "Stopped"
+        except Exception as e:
+            return f"stop failed: {type(e).__name__}: {e}"
+
+    def balance_stand(self) -> str:
+        """Switch G1 into balanced standing posture."""
+        err = self._require_connected()
+        if err:
+            return err
+        try:
+            self._loco_client.BalanceStand()
+            return "Balance stand activated"
+        except Exception as e:
+            return f"balance_stand failed: {type(e).__name__}: {e}"
+
+    def damp(self) -> str:
+        """Put all G1 motors into damping (compliant/low-power) mode."""
+        err = self._require_connected()
+        if err:
+            return err
+        try:
+            self._loco_client.Damp()
+            return "Damping mode activated"
+        except Exception as e:
+            return f"damp failed: {type(e).__name__}: {e}"
+
+    def wave_hand(self) -> str:
+        """Command G1 to wave its hand."""
+        err = self._require_connected()
+        if err:
+            return err
+        try:
+            self._loco_client.WaveHand()
+            return "Waving hand"
+        except Exception as e:
+            return f"wave_hand failed: {type(e).__name__}: {e}"
+
+    # ------------------------------------------------------------------
+    # Telemetry — IMU
+    # ------------------------------------------------------------------
+
+    def get_imu(self) -> dict | str:
+        """Read IMU state from rt/lowstate: roll, pitch, yaw and linear accelerations."""
+        state = self._require_low_state()
+        if isinstance(state, str):
+            return state
+        try:
+            imu = state.imu_state
+            rpy = list(imu.rpy) if hasattr(imu, "rpy") else [0.0, 0.0, 0.0]
+            acc = list(imu.accelerometer) if hasattr(imu, "accelerometer") else [0.0, 0.0, 0.0]
+            return {
+                "roll_rad": round(rpy[0], 5),
+                "pitch_rad": round(rpy[1], 5),
+                "yaw_rad": round(rpy[2], 5),
+                "acc_x": round(acc[0], 5),
+                "acc_y": round(acc[1], 5),
+                "acc_z": round(acc[2], 5),
+            }
+        except Exception as e:
+            return f"Failed to read G1 IMU: {e}"
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _require_connected(self) -> str | None:
+        """Return an error string if not connected, else None."""
+        if not self._connected or self._loco_client is None:
+            return "Not connected. Call connect() first."
+        return None
 
     def _on_low_state(self, msg) -> None:
         """LowState subscriber callback."""

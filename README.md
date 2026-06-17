@@ -1,231 +1,263 @@
 # HarcOS — Humanoid Robot Control System
 
-A modular, hardware-agnostic control framework for humanoid robots using the Model Context Protocol (MCP). HarcOS provides a unified interface to manage multiple robot platforms (Unitree Go2, Unitree G1, and more) through standardized skills and CLI commands.
+A modular control framework for Unitree robots built on the [Model Context Protocol](https://modelcontextprotocol.io), inspired by [DimOS](https://github.com/dimensionalOS/dimos). Each robot's capabilities are exposed as MCP tools, accessible to AI agents (via Ollama) or any Python script.
 
-## Project Architecture
+---
 
-HarcOS is built on clean separation of concerns:
+## Project Structure
 
 ```
 HarcOS/
-├── mcp_server.py           ← Shared FastMCP server factory
-├── registry.py             ← Robot name → blueprint mapping
 ├── run.py                  ← CLI entry point
+├── registry.py             ← Robot name → blueprint mapping
+├── mcp_server.py           ← Shared FastMCP server factory
 ├── robots/
 │   ├── base.py             ← RobotController abstract base class
 │   ├── go2/
-│   │   ├── controller.py   ← Go2 hardware integration layer
-│   │   ├── skills.py       ← MCP tool registrations for Go2
-│   │   └── blueprint.py    ← Go2 factory function
+│   │   ├── controller.py   ← Go2 hardware (WebRTC)
+│   │   ├── skills.py       ← Go2 MCP tools
+│   │   └── blueprint.py    ← Go2 factory
 │   └── g1/
-│       ├── controller.py   ← G1 hardware integration (SDK2 DDS)
-│       ├── skills.py       ← MCP tool registrations for G1
-│       └── blueprint.py    ← G1 factory function
+│       ├── controller.py   ← G1 hardware (DDS / SDK2)
+│       ├── skills.py       ← G1 MCP tools
+│       └── blueprint.py    ← G1 factory
+├── clients/
+│   ├── __init__.py         ← exports RobotClientConfig, RobotClient, G1Client, Go2Client
+│   ├── base.py             ← RobotClient — generic MCP client + Ollama agent loop
+│   ├── g1.py               ← G1Client
+│   └── go2.py              ← Go2Client
 └── requirements.txt
 ```
 
-## Core Design Principles
+---
 
-**1. Shared MCP Infrastructure**
-   - `mcp_server.py` centralizes FastMCP instance creation
-   - All robot blueprints reuse the same server factory
-   - Single source of truth prevents duplication
+## Running the MCP Server
 
-**2. Per-Robot Composition**
-   - `robots/<robot>/blueprint.py` assembles controller + skills + MCP server
-   - Returns (mcp, controller) tuple ready for execution
-   - Enables easy robot swapping
-
-**3. Per-Robot Skill Registration**
-   - `robots/<robot>/skills.py` registers MCP @tool decorators
-   - Each robot type has independent skill definitions
-   - Extensible design for custom capabilities
-
-**4. Minimal Core Skills**
-   - `connect` / `disconnect` — establish/close robot connection
-   - `get_battery` — battery status
-   - `move` / `stop` — motion control
-   - Robot-specific skills (Go2: sport commands; G1: stand_up/stand_down)
-
-## Usage
-
-### Go2 Robot
+### stdio (Claude Desktop / MCP Inspector)
 
 ```bash
-# Default connection (stdio mode for Claude Desktop)
-python run.py go2
+python run.py g1                          # G1 — auto-detect DDS interface
+python run.py g1 --interface eth0         # G1 — specify interface
+python run.py go2 --ip 192.168.123.161   # Go2 — specific IP
+```
 
-# Connect to specific IP address
-python run.py go2 --ip 192.168.123.161
+### HTTP SSE server (Python client / agent loop)
 
-# HTTP server mode (port 9990)
+```bash
+python run.py g1  --transport sse --port 9991
 python run.py go2 --transport sse --port 9990
 ```
 
-### G1 Robot
+The server listens on `http://localhost:<port>/sse`.  
+`0.0.0.0` is the **bind address** — always use `localhost` (or the machine's IP) in client URLs.
+
+---
+
+## MCP Inspector
+
+Browse and call tools interactively in a browser UI:
 
 ```bash
-# Default connection — DDS network interface is auto-detected
-python run.py g1
+# stdio mode
+npx @modelcontextprotocol/inspector python run.py g1
+npx @modelcontextprotocol/inspector python run.py go2
 
-# Override interface if auto-detection picks the wrong one
-python run.py g1 --interface enp0s31f6
-
-# HTTP server mode (port 9991)
-python run.py g1 --transport sse --port 9991
+# SSE mode (server must already be running)
+npx @modelcontextprotocol/inspector
+# → set Transport: SSE, URL: http://localhost:9991/sse
 ```
 
-> **Note:** The G1 communicates over DDS (not WebRTC like Go2). It requires a
-> physical Ethernet interface connected to the robot's network. DDS is initialized
-> with `ChannelFactoryInitialize(0, <interface>)` — this is process-global and
-> cannot be re-initialized within the same process.
+> **Tip:** In the inspector, always use `http://localhost:<port>/sse` — not `http://0.0.0.0:<port>`.
 
-### MCP Inspector (Debugging & Testing)
+---
 
-Use the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) to interactively explore and test all available tools:
+## Python Client
+
+### Architecture (DimOS-inspired)
+
+The client uses a `RobotClientConfig` dataclass to hold all settings (transport, model, system prompt, server URL). Both transports (`stdio` and `http`) share the same `mcp.ClientSession` interface — all methods work identically.
+
+```
+RobotClientConfig          RobotClient
+  robot, model,      →      _connect_stdio()  or  _connect_http()
+  transport,                 ↓                      ↓
+  server_url,           StdioServerParameters    sse_client(url)
+  system_prompt,             ↓                      ↓
+  verbose               ClientSession          ClientSession
+                             ↓
+                        list_tools() / call() / agent_send()
+```
+
+### Two transports
+
+| | stdio | http |
+|---|---|---|
+| **How** | Spawns `run.py` subprocess | Connects to running SSE server |
+| **Start** | automatic | `python run.py <robot> --transport sse` |
+| **Best for** | Claude Desktop, one-off scripts | Agent loop, persistent sessions |
+| **agent_send()** | ✓ | ✓ |
+
+### Python API
+
+```python
+from clients import G1Client, Go2Client, RobotClient, RobotClientConfig
+import asyncio
+
+# --- Direct calls (stdio, default) ---
+async def main():
+    async with G1Client() as robot:
+        print(await robot.connect())
+        await robot.stand_up()
+        await robot.move(0.2, 0.0, 0.0)
+        await robot.stop()
+        await robot.wave_hand()
+        await robot.damp()
+
+asyncio.run(main())
+```
+
+```python
+# --- HTTP transport (server must be running) ---
+async def main():
+    async with G1Client(transport="http", server_url="http://localhost:9991") as robot:
+        print(await robot.list_tools())
+        print(await robot.call("connect"))
+
+asyncio.run(main())
+```
+
+```python
+# --- Generic client — any robot, any tool ---
+async def main():
+    async with RobotClient(RobotClientConfig("g1")) as robot:
+        print(await robot.list_tools())
+        print(await robot.call("get_imu"))
+
+asyncio.run(main())
+```
+
+### Ollama Agent Loop
+
+Requires [Ollama](https://ollama.com) running locally with a tool-calling model (`llama3.2`, `llama3.1`, `mistral`, `qwen2.5`, etc.).
+
+#### `agent_send()` — persistent multi-turn (DimOS pattern)
+
+History is preserved across calls. Both transports supported.
+
+```python
+from clients import G1Client
+import asyncio
+
+async def main():
+    async with G1Client() as robot:
+        reply = await robot.agent_send("connect and stand up")
+        print(reply)
+        reply = await robot.agent_send("now wave your hand")   # history kept
+        print(reply)
+        robot.clear_history()                                   # fresh session
+
+asyncio.run(main())
+```
+
+#### `run_agent()` — single-shot (backward compat)
+
+No history across calls. Useful for one-off commands.
+
+```python
+async def main():
+    async with G1Client() as robot:
+        await robot.run_agent(
+            "Connect to the robot, stand it up, then wave its hand",
+            model="llama3.2",
+            verbose=True,
+        )
+
+asyncio.run(main())
+```
+
+### CLI
 
 ```bash
-# Inspect Go2 robot tools
-npx @modelcontextprotocol/inspector python3 run.py go2
+# Go2 — list tools and attempt connect
+python -m clients.go2 --ip 192.168.123.161
 
-# Inspect G1 robot tools
-npx @modelcontextprotocol/inspector python3 run.py g1
+# Go2 — Ollama agent
+python -m clients.go2 --agent "Connect and check the battery"
+
+# Go2 — HTTP transport + agent
+python -m clients.go2 --transport http --agent "go forward 1 meter"
+
+# Use a different Ollama model
+python -m clients.go2 --agent "What tools are available?" --model qwen2.5
 ```
 
-This launches a browser-based UI where you can browse all registered MCP tools, call them manually, and inspect inputs/outputs — useful for development and hardware debugging.
+---
+
+## Skills Reference
+
+### G1 (humanoid)
+
+| Tool | Description |
+|---|---|
+| `connect` | Connect over DDS |
+| `disconnect` | Disconnect cleanly |
+| `get_battery` | Voltage proxy via motor state |
+| `get_imu` | Roll, pitch, yaw (rad) + accelerations (m/s²) |
+| `stand_up` | Stand up from sitting / lying |
+| `stand_down` | Sit / lie down from standing |
+| `balance_stand` | Enter stable balanced posture |
+| `move` | Velocity command: `vx`, `vy`, `vyaw` |
+| `stop` | Stop all movement |
+| `damp` | Motors into compliant / low-power mode |
+| `wave_hand` | Wave hand |
+
+### Go2 (quadruped)
+
+| Tool | Description |
+|---|---|
+| `connect` | Connect over WebRTC |
+| `disconnect` | Disconnect cleanly |
+| `get_battery` | Charge %, voltage, current, cycle count |
+
+---
 
 ## Environment Variables
 
-**Go2:**
-- `ROBOT_IP` — Go2 IP address (defaults to 192.168.123.161)
+| Variable | Robot | Description |
+|---|---|---|
+| `ROBOT_IP` | Go2 | Robot IP (default: `192.168.123.161`) |
+| `G1_ROBOT_IP` | G1 | Optional identifier, not used by DDS |
+| `G1_NETWORK_INTERFACE` | G1 | DDS interface (auto-detected if not set) |
 
-**G1:**
-- `G1_ROBOT_IP` — G1 identifier/IP (optional, not used by DDS transport)
-- `G1_NETWORK_INTERFACE` — Network interface for DDS communication. **Auto-detected** if not set (tries `eth0` → `enp0s31f6` → `enp0s25` → `eno1` → first non-loopback). Override only if auto-detection picks the wrong interface.
+---
 
-## G1 Technical Notes
+## Technical Notes
 
-### DDS Transport vs WebRTC
+### Go2 vs G1 transport
+
 | | Go2 | G1 |
 |---|---|---|
-| Transport | WebRTC (`unitree_webrtc_connect_leshy`) | DDS / CycloneDDS (`unitree_sdk2py`) |
-| Addressing | IP address | Network interface name |
-| Motion client | `SportClient` | `LocoClient` + `MotionSwitcherClient` |
+| Transport | WebRTC | DDS (CycloneDDS) |
+| Addressing | IP address | Network interface |
+| SDK | `unitree_webrtc_connect_leshy` | `unitree_sdk2py` (Linux only) |
+| Motion client | `SportClient` | `LocoClient` |
 
-### IDL Schema: `unitree_hg` vs `unitree_go`
-Go2 uses the `unitree_go` IDL; G1 uses the **`unitree_hg` (humanoid)** IDL. These
-are **structurally different**. The key consequence:
+### G1 battery
 
-| Field | `unitree_go.LowState_` (Go2) | `unitree_hg.LowState_` (G1) |
-|---|---|---|
-| `bms_state` | ✅ Present | ❌ Not present |
-| `power_v` / `power_a` | ✅ Present | ❌ Not present |
-| `motor_state[i].vol` | ✅ Present | ✅ Present |
-| `imu_state` | ✅ Present | ✅ Present |
+`unitree_hg.LowState_` (G1's IDL) has no BMS fields. `get_battery()` returns the average motor supply voltage (~51 V) as a proxy. The `soc_percent` value is a placeholder — full SOC would require a separate BMS topic subscription.
 
-### `get_battery` on G1
-Because `unitree_hg.LowState_` has no BMS/power fields, `get_battery()` on G1
-returns the **motor supply voltage** as a proxy and a **placeholder SOC** of 85%.
-Full battery SOC would require subscribing to a separate BMS DDS topic (not yet
-implemented). The `voltage_v` field (~51V) is real and reflects the power bus voltage.
+### G1 SDK on Windows
+
+`unitree_sdk2py` requires native CycloneDDS which is Linux-only. On Windows, `connect()` will return `"unitree_sdk2py not installed"`. Use a Linux machine or WSL to run G1 in production.
 
 ---
 
 ## Adding a New Robot
 
-HarcOS is designed for extensibility. To add H1, H2, or any other robot platform:
+1. Create `robots/<name>/controller.py` — subclass `RobotController` from `robots/base.py`
+2. Create `robots/<name>/skills.py` — implement `register(mcp, controller)`
+3. Create `robots/<name>/blueprint.py` — implement `build_<name>()` returning `(mcp, controller)`
+4. Register in `registry.py`: `BLUEPRINTS["<name>"] = build_<name>`
+5. Optionally add `clients/<name>.py` — subclass `RobotClient` with typed method wrappers
 
-### 1. Create `robots/h1/controller.py`
-
-```python
-from robots.base import RobotController
-
-class H1Controller(RobotController):
-    def __init__(self, **kwargs):
-        # Initialize your hardware connection
-        pass
-    
-    def connect(self) -> str:
-        # Establish connection to robot — return a human-readable status string
-        return "Connected to H1"
-    
-    def disconnect(self):
-        # Close connection gracefully
-        pass
-    
-    def move(self, vx: float, vy: float, omega: float) -> dict:
-        # Execute motion command
-        pass
-    
-    def stop(self) -> dict:
-        # Stop all motion
-        return {"status": "stopped"}
-    
-    def get_battery(self) -> dict | str:
-        # Return battery status dict, or error string on failure
-        return {"soc_percent": 100, "voltage_v": 51.0, "current_a": 0.0}
-    
-    def get_pose(self) -> dict:
-        # Return current pose/position
-        return {"x": 0, "y": 0, "theta": 0}
-```
-
-### 2. Create `robots/h1/skills.py`
-
-```python
-from fastmcp import FastMCP
-from robots.base import RobotController
-
-def register(mcp: FastMCP, controller: RobotController):
-    @mcp.tool()
-    def connect() -> str:
-        """Connect to H1 robot."""
-        result = controller.connect()
-        return f"Connected: {result}"
-    
-    @mcp.tool()
-    def get_battery() -> str:
-        """Get H1 battery status."""
-        result = controller.get_battery()
-        return f"Battery: {result['battery']}%"
-    
-    # Add more skills as needed
-```
-
-### 3. Create `robots/h1/blueprint.py`
-
-```python
-from robots.h1.controller import H1Controller
-from robots.h1.skills import register
-from mcp_server import create_server
-
-def build_h1():
-    """Factory function to assemble H1 robot with MCP server."""
-    mcp = create_server("h1")
-    controller = H1Controller()
-    register(mcp, controller)
-    return mcp, controller
-```
-
-### 4. Update `registry.py`
-
-```python
-from robots.h1.blueprint import build_h1
-
-BLUEPRINTS = {
-    "go2": build_go2,
-    "g1": build_g1,
-    "h1": build_h1,  # Add this line
-}
-```
-
-**Done!** Now `python run.py h1` will work immediately.
-
-## Design Philosophy
-
-- **Minimal Core**: Only essential hardware abstraction
-- **Modular Skills**: Each robot independently registers capabilities
-- **Clean Interfaces**: `RobotController` base class enforces consistency
-- **Extensible**: Add new robots without modifying existing code
-- **MCP-First**: All skills exposed as standardized MCP tools for AI agents
-# HarcOS
+`python run.py <name>` works immediately after step 4.
