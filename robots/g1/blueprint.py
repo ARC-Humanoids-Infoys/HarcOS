@@ -20,8 +20,8 @@ Here: just the core MCP + controller + skills (no LLM agent client).
 from mcp.server.fastmcp import FastMCP
 
 from mcp_server import create_server
-from robots.g1.controller1 import G1Controller
-import robots.g1.skills1 as g1_skills
+from robots.g1.controller import G1Controller
+import robots.g1.skills as g1_skills
 
 
 def build_g1(
