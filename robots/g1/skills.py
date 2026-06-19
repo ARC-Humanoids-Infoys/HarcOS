@@ -24,7 +24,7 @@ from robots.g1.controller import G1Controller
 def _run_sync(fn, *args, **kwargs):
     """Run a blocking controller method in a thread pool so it does not block
     the asyncio event loop (prevents MCP -32001 Request timed out errors)."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()  # get_event_loop() is broken in Python 3.12+
     return loop.run_in_executor(None, partial(fn, *args, **kwargs))
 
 

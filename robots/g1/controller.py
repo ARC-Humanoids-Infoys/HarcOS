@@ -360,14 +360,21 @@ class G1Controller(RobotController):
         with self._lock:
             self._latest_low_state = msg
 
-    def _require_low_state(self):
-        """Wait for and return the latest low state message."""
+    def _require_low_state(self, timeout: float = 5.0):
+        """Wait for and return the latest low state message.
+
+        DDS discovery after connect() can take several seconds before the first
+        rt/lowstate message arrives.  5 s is a safe default.
+        """
         if not self._connected:
             return "Not connected"
-        deadline = time.time() + 2.0
+        deadline = time.time() + timeout
         while self._latest_low_state is None and time.time() < deadline:
             time.sleep(0.05)
         if self._latest_low_state is None:
-            return "No low state data received yet"
+            return (
+                f"No low state data received within {timeout:.0f}s. "
+                "Check DDS network interface and that the robot is powered on."
+            )
         with self._lock:
             return self._latest_low_state
