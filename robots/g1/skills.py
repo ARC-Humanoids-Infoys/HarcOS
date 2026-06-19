@@ -11,11 +11,21 @@ Only core skills:
 The register(mcp, controller) function is called from robots/g1/blueprint.py.
 """
 
+import asyncio
+from functools import partial
+
 from pydantic import BaseModel
 
 from mcp.server.fastmcp import FastMCP
 
 from robots.g1.controller import G1Controller
+
+
+def _run_sync(fn, *args, **kwargs):
+    """Run a blocking controller method in a thread pool so it does not block
+    the asyncio event loop (prevents MCP -32001 Request timed out errors)."""
+    loop = asyncio.get_event_loop()
+    return loop.run_in_executor(None, partial(fn, *args, **kwargs))
 
 
 class BatteryState(BaseModel):
@@ -41,36 +51,39 @@ def register(mcp: FastMCP, controller: G1Controller) -> None:
     """Register selected G1 skills onto the MCP server."""
 
     @mcp.tool()
-    def connect() -> ActionResult:
+    async def connect() -> ActionResult:
         """Connect to the G1 humanoid robot over DDS."""
-        return ActionResult(message=controller.connect())
+        msg = await _run_sync(controller.connect)
+        return ActionResult(message=msg)
 
     @mcp.tool()
-    def disconnect() -> ActionResult:
+    async def disconnect() -> ActionResult:
         """Disconnect from the G1 humanoid robot."""
-        controller.disconnect()
+        await _run_sync(controller.disconnect)
         return ActionResult(message="Disconnected from G1")
 
     @mcp.tool()
-    def get_battery() -> BatteryState:
+    async def get_battery() -> BatteryState:
         """Get battery state: charge %, voltage, current."""
-        result = controller.get_battery()
+        result = await _run_sync(controller.get_battery)
         if isinstance(result, str):
             raise RuntimeError(result)
         return BatteryState(**result)
 
     @mcp.tool()
-    def stand_up() -> ActionResult:
+    async def stand_up() -> ActionResult:
         """Command the G1 to stand up from a sitting or lying position."""
-        return ActionResult(message=controller.stand_up())
+        msg = await _run_sync(controller.stand_up)
+        return ActionResult(message=msg)
 
     @mcp.tool()
-    def stand_down() -> ActionResult:
+    async def stand_down() -> ActionResult:
         """Command the G1 to sit / lie down from a standing position."""
-        return ActionResult(message=controller.stand_down())
+        msg = await _run_sync(controller.stand_down)
+        return ActionResult(message=msg)
 
     @mcp.tool()
-    def move(vx: float, vy: float, vyaw: float) -> ActionResult:
+    async def move(vx: float, vy: float, vyaw: float) -> ActionResult:
         """Send a continuous velocity command to the G1.
 
         Args:
@@ -78,32 +91,37 @@ def register(mcp: FastMCP, controller: G1Controller) -> None:
             vy:   Left (+) / right (-) lateral speed in m/s.
             vyaw: Counter-clockwise (+) yaw rate in rad/s.
         """
-        return ActionResult(message=controller.move(vx, vy, vyaw))
+        msg = await _run_sync(controller.move, vx, vy, vyaw)
+        return ActionResult(message=msg)
 
     @mcp.tool()
-    def stop() -> ActionResult:
+    async def stop() -> ActionResult:
         """Stop all G1 movement immediately."""
-        return ActionResult(message=controller.stop())
+        msg = await _run_sync(controller.stop)
+        return ActionResult(message=msg)
 
     @mcp.tool()
-    def balance_stand() -> ActionResult:
+    async def balance_stand() -> ActionResult:
         """Switch G1 into a stable balanced standing posture."""
-        return ActionResult(message=controller.balance_stand())
+        msg = await _run_sync(controller.balance_stand)
+        return ActionResult(message=msg)
 
     @mcp.tool()
-    def damp() -> ActionResult:
+    async def damp() -> ActionResult:
         """Put all G1 motors into damping (compliant / low-power) mode. Safe shutdown posture."""
-        return ActionResult(message=controller.damp())
+        msg = await _run_sync(controller.damp)
+        return ActionResult(message=msg)
 
     @mcp.tool()
-    def wave_hand() -> ActionResult:
+    async def wave_hand() -> ActionResult:
         """Command the G1 to wave its hand."""
-        return ActionResult(message=controller.wave_hand())
+        msg = await _run_sync(controller.wave_hand)
+        return ActionResult(message=msg)
 
     @mcp.tool()
-    def get_imu() -> ImuState:
+    async def get_imu() -> ImuState:
         """Read IMU state: roll, pitch, yaw (radians) and linear accelerations (m/s²)."""
-        result = controller.get_imu()
+        result = await _run_sync(controller.get_imu)
         if isinstance(result, str):
             raise RuntimeError(result)
         return ImuState(**result)
