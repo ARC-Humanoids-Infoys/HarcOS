@@ -4,6 +4,24 @@
 # MCP framework
 mcp>=1.27.1
 
+# HTTP transport for agent loop (clients/base.py — DimOS httpx pattern)
+httpx>=0.27.0
+
+# Ollama agent loop (clients/base.py — direct SDK)
+ollama>=0.3.0
+
+# LangChain / LangGraph agent loop (clients/mcp_client.py — DimOS McpClient pattern)
+langchain>=0.3.0
+langchain-core>=0.3.0
+langgraph>=0.2.0
+
+# Ollama support for HarcMcpClient (model="ollama:llama3.2")
+langchain-ollama>=0.2.0
+
+# OpenAI support for HarcMcpClient (model="gpt-4o") — optional
+# Requires OPENAI_API_KEY environment variable
+# langchain-openai>=0.2.0
+
 # Go2 WebRTC SDK
 unitree_webrtc_connect_leshy>=2.0.7
 

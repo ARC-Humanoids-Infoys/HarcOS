@@ -20,6 +20,12 @@ import sys
 
 from registry import BLUEPRINTS
 
+# Per-robot default SSE ports.  Must match the server_url defaults in each client.
+ROBOT_DEFAULT_PORTS: dict[str, int] = {
+    "go2": 9990,
+    "g1": 9991,
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -44,15 +50,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--transport",
-        choices=["stdio", "sse"],
+        choices=["stdio", "sse", "streamable-http"],
         default="stdio",
-        help="MCP transport: stdio (Claude Desktop) or sse (HTTP server)",
+        help="MCP transport: stdio (Claude Desktop), sse (HTTP SSE), or streamable-http (HTTP POST JSON-RPC 2.0)",
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=9990,
-        help="HTTP port when --transport sse (default: 9990)",
+        default=None,
+        help="HTTP port when --transport sse (default: 9990 for go2, 9991 for g1)",
     )
     return parser.parse_args()
 
@@ -79,12 +85,21 @@ def main() -> None:
 
     print(f"[HarcOS] Blueprint built. Starting MCP server...", file=sys.stderr)
 
-    if args.transport == "sse":
-        print(
-            f"[HarcOS] SSE server listening on http://localhost:{args.port}/sse",
-            file=sys.stderr,
-        )
-        mcp.run(transport="sse", host="0.0.0.0", port=args.port)
+    if args.transport in ("sse", "streamable-http"):
+        port = args.port if args.port is not None else ROBOT_DEFAULT_PORTS.get(args.robot, 9990)
+        mcp.settings.host = "0.0.0.0"
+        mcp.settings.port = port
+        if args.transport == "streamable-http":
+            print(
+                f"[HarcOS] HTTP server listening on http://localhost:{port}/mcp (JSON-RPC 2.0 POST)",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[HarcOS] HTTP server listening on http://localhost:{port}/sse",
+                file=sys.stderr,
+            )
+        mcp.run(transport=args.transport)
     else:
         print(f"[HarcOS] Stdio mode (Claude Desktop compatible)", file=sys.stderr)
         mcp.run(transport="stdio")
