@@ -106,8 +106,32 @@ class G1Client(RobotClient):
         return await self.call("damp")
 
     async def wave_hand(self) -> str:
-        """Wave hand."""
+        """High wave gesture."""
         return await self.call("wave_hand")
+
+    async def shake_hand(self) -> str:
+        """Handshake gesture."""
+        return await self.call("shake_hand")
+
+    async def clap(self) -> str:
+        """Clap gesture."""
+        return await self.call("clap")
+
+    async def high_five(self) -> str:
+        """High five gesture."""
+        return await self.call("high_five")
+
+    async def hug(self) -> str:
+        """Hug gesture."""
+        return await self.call("hug")
+
+    async def hands_up(self) -> str:
+        """Raise both hands gesture."""
+        return await self.call("hands_up")
+
+    async def cancel_action(self) -> str:
+        """Cancel ongoing arm gesture and return to default position."""
+        return await self.call("cancel_action")
 
 
 if __name__ == "__main__":
