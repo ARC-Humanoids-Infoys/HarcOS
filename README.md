@@ -102,7 +102,7 @@ python run_g1_nlp.py --cmd "stand up and wave"       # single command, non-inter
 
 ## HarcMcpClient (LangGraph agent — DimOS McpClient pattern)
 
-`clients/mcp_client.py` implements the same architecture as DimOS's `McpClient`:
+`clients/mcp_client.py` architecture:
 
 ```
 Natural language text
