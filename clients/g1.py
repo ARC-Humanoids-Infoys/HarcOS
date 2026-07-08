@@ -87,15 +87,16 @@ class G1Client(RobotClient):
         """Enter stable balanced standing posture."""
         return await self.call("balance_stand")
 
-    async def move(self, vx: float, vy: float, vyaw: float) -> str:
+    async def move(self, vx: float, vy: float, vyaw: float, duration: float = 2.0) -> str:
         """Send a velocity command.
 
         Args:
-            vx:   Forward (+) / backward (-) in m/s.
-            vy:   Left (+) / right (-) in m/s.
-            vyaw: Counter-clockwise (+) yaw rate in rad/s.
+            vx:       Forward (+) / backward (-) in m/s.
+            vy:       Left (+) / right (-) in m/s.
+            vyaw:     Counter-clockwise (+) yaw rate in rad/s.
+            duration: How long to move in seconds (default: 2.0).
         """
-        return await self.call("move", {"vx": vx, "vy": vy, "vyaw": vyaw})
+        return await self.call("move", {"vx": vx, "vy": vy, "vyaw": vyaw, "duration": duration})
 
     async def stop(self) -> str:
         """Stop all movement immediately."""
@@ -132,6 +133,22 @@ class G1Client(RobotClient):
     async def cancel_action(self) -> str:
         """Cancel ongoing arm gesture and return to default position."""
         return await self.call("cancel_action")
+
+    async def execute_arm_command(self, command_name: str) -> str:
+        """Execute a named arm gesture.
+
+        Valid names: high_wave, shake_hand, clap, high_five, hug, hands_up,
+                     face_wave, arm_heart, right_heart, reject, right_hand_up,
+                     x_ray, two_hand_kiss, left_kiss, right_kiss, cancel_action
+        """
+        return await self.call("execute_arm_command", {"command_name": command_name})
+
+    async def execute_mode_command(self, mode_name: str) -> str:
+        """Switch G1 locomotion FSM mode by name.
+
+        Valid modes: walk, run, walk_waist, stand_up, stand_down, damp, sit, zero_torque
+        """
+        return await self.call("execute_mode_command", {"mode_name": mode_name})
 
 
 if __name__ == "__main__":

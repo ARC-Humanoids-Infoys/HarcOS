@@ -10,6 +10,8 @@ A modular control framework for Unitree robots built on the [Model Context Proto
 HarcOS/
 ├── run.py                  ← Start the MCP server
 ├── run_g1_nlp.py           ← Interactive natural-language shell (G1)
+├── run_g1_sim.py           ← G1 simulation entry point (DimOS)
+├── web_client.py           ← Browser UI for tools and NLP agent
 ├── registry.py             ← Robot name → blueprint mapping
 ├── mcp_server.py           ← FastMCP server factory
 ├── robots/
@@ -252,7 +254,7 @@ async def main():
         await robot.connect()
         await robot.stand_up()
         await robot.move(0.2, 0.0, 0.0, duration=3.0)
-        await robot.execute_arm_command("high_wave")
+        await robot.execute_arm_command("arm_heart")
         await robot.damp()
 
 asyncio.run(main())
@@ -296,6 +298,8 @@ python -m clients.g1 --transport http --agent "wave your hand"
 | `start_policy` / `stop_policy` / `policy_status` / `list_policies` | RoboJuDo management |
 | `walk(forward, sideways, turn)` | Walk via RL policy |
 | `policy_command(name)` | High-level policy command (emergency_stop, start_motion, …) |
+| `hold_pose` | Stop movement and hold current pose (keeps RL policy active for balance) |
+| `do_gesture(name)` | Safely run an arm gesture while a policy is active (pauses movement first) |
 
 ### Go2 (quadruped)
 
@@ -330,7 +334,7 @@ run_g1_nlp.py  ──  LangGraph ReAct Agent
 MCP Server  (run.py g1 --transport streamable-http)
         │
         ▼
-G1 Skills  (robots/g1/skills.py)  ←── 25 MCP tools
+G1 Skills  (robots/g1/skills.py)  ←── 27 MCP tools
         │
         ├─── Direct WebRTC path ──────────────────────────────────┐
         │    stand_up, wave, move, get_battery, get_imu …         │
@@ -431,7 +435,7 @@ connect, disconnect, get_battery, stand_up, stand_down, move, stop,
 balance_stand, damp, wave_hand, shake_hand, clap, high_five, hug,
 hands_up, cancel_action, execute_arm_command, execute_mode_command,
 get_imu, start_policy, stop_policy, policy_status,
-list_policies, walk, policy_command
+list_policies, walk, policy_command, hold_pose, do_gesture
 ```
 
 **RoboJuDo — list configs (no robot needed)**
