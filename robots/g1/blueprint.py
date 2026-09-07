@@ -26,19 +26,20 @@ import robots.g1.skills as g1_skills
 
 def build_g1(
     ip: str | None = None,
-    network_interface: str | None = None,
+    network_interface: str | None = None,  # accepted but unused (WebRTC uses IP)
+    **kwargs,
 ) -> tuple[FastMCP, G1Controller]:
     """
     Build the G1 blueprint.
 
     Args:
-        ip: Robot identifier (optional, for logging).
-        network_interface: Network interface for DDS (e.g. "eth0").
+        ip: Main controller IP (default: 192.168.123.161).
+            Override via G1_ROBOT_IP or ROBOT_IP env var.
 
     Returns:
         (mcp, controller) tuple — pass mcp to mcp.run() in run.py.
     """
     mcp = create_server("harcos-g1")
-    controller = G1Controller(ip=ip, network_interface=network_interface)
+    controller = G1Controller(ip=ip)
     g1_skills.register(mcp, controller)
     return mcp, controller
