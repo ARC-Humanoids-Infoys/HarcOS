@@ -29,3 +29,12 @@ unitree_webrtc_connect_leshy>=2.0.7
 # Install separately if you have G1:
 #   pip install unitree_sdk2py
 # unitree_sdk2py
+
+# Optional: Rubojudo behavior backend for robot action orchestration
+# Install separately if you want to enable the adapter.
+# The package name may differ depending on the source.
+# Examples:
+#   pip install rubojudo
+#   pip install -e /path/to/rubojudo
+#   pip install --index-url https://your-private-index.example/simple rubojudo
+# rubojudo
