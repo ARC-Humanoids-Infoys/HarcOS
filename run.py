@@ -50,9 +50,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--transport",
-        choices=["stdio", "sse"],
+        choices=["stdio", "sse", "streamable-http"],
         default="stdio",
-        help="MCP transport: stdio (Claude Desktop) or sse (HTTP server)",
+        help="MCP transport: stdio (Claude Desktop), sse (HTTP SSE), or streamable-http (HTTP POST JSON-RPC 2.0)",
     )
     parser.add_argument(
         "--port",
@@ -85,18 +85,21 @@ def main() -> None:
 
     print(f"[HarcOS] Blueprint built. Starting MCP server...", file=sys.stderr)
 
-    if args.transport == "sse":
+    if args.transport in ("sse", "streamable-http"):
         port = args.port if args.port is not None else ROBOT_DEFAULT_PORTS.get(args.robot, 9990)
-        # host/port live on mcp.settings, not on run().
-        # stateless_http=True: each POST is independent, no session tokens needed.
-        # Use streamable-http so the client can POST to /mcp (DimOS pattern).
         mcp.settings.host = "0.0.0.0"
         mcp.settings.port = port
-        print(
-            f"[HarcOS] HTTP server listening on http://localhost:{port}/sse",
-            file=sys.stderr,
-        )
-        mcp.run(transport="sse")
+        if args.transport == "streamable-http":
+            print(
+                f"[HarcOS] HTTP server listening on http://localhost:{port}/mcp (JSON-RPC 2.0 POST)",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[HarcOS] HTTP server listening on http://localhost:{port}/sse",
+                file=sys.stderr,
+            )
+        mcp.run(transport=args.transport)
     else:
         print(f"[HarcOS] Stdio mode (Claude Desktop compatible)", file=sys.stderr)
         mcp.run(transport="stdio")

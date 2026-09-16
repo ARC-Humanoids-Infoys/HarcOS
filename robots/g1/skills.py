@@ -31,7 +31,8 @@ def _run_sync(fn, *args, **kwargs):
 class BatteryState(BaseModel):
     soc_percent: int | None
     voltage_v: float
-    current_a: float
+    current_a: float | None
+    cycle_count: int | None = None
 
 
 class ImuState(BaseModel):
@@ -83,15 +84,16 @@ def register(mcp: FastMCP, controller: G1Controller) -> None:
         return ActionResult(message=msg)
 
     @mcp.tool()
-    async def move(vx: float, vy: float, vyaw: float) -> ActionResult:
+    async def move(vx: float, vy: float, vyaw: float, duration: float = 2.0) -> ActionResult:
         """Send a continuous velocity command to the G1.
 
         Args:
-            vx:   Forward (+) / backward (-) speed in m/s.
-            vy:   Left (+) / right (-) lateral speed in m/s.
-            vyaw: Counter-clockwise (+) yaw rate in rad/s.
+            vx:       Forward (+) / backward (-) speed in m/s.
+            vy:       Left (+) / right (-) lateral speed in m/s.
+            vyaw:     Counter-clockwise (+) yaw rate in rad/s.
+            duration: How long to move in seconds (default: 2.0).
         """
-        msg = await _run_sync(controller.move, vx, vy, vyaw)
+        msg = await _run_sync(controller.move, vx, vy, vyaw, duration)
         return ActionResult(message=msg)
 
     @mcp.tool()
@@ -114,8 +116,64 @@ def register(mcp: FastMCP, controller: G1Controller) -> None:
 
     @mcp.tool()
     async def wave_hand() -> ActionResult:
-        """Command the G1 to wave its hand."""
+        """Command the G1 to perform a high wave gesture."""
         msg = await _run_sync(controller.wave_hand)
+        return ActionResult(message=msg)
+
+    @mcp.tool()
+    async def shake_hand() -> ActionResult:
+        """Command the G1 to offer a handshake."""
+        msg = await _run_sync(controller.shake_hand)
+        return ActionResult(message=msg)
+
+    @mcp.tool()
+    async def clap() -> ActionResult:
+        """Command the G1 to clap its hands."""
+        msg = await _run_sync(controller.clap)
+        return ActionResult(message=msg)
+
+    @mcp.tool()
+    async def high_five() -> ActionResult:
+        """Command the G1 to give a high five."""
+        msg = await _run_sync(controller.high_five)
+        return ActionResult(message=msg)
+
+    @mcp.tool()
+    async def hug() -> ActionResult:
+        """Command the G1 to give a hug."""
+        msg = await _run_sync(controller.hug)
+        return ActionResult(message=msg)
+
+    @mcp.tool()
+    async def hands_up() -> ActionResult:
+        """Command the G1 to raise both hands."""
+        msg = await _run_sync(controller.hands_up)
+        return ActionResult(message=msg)
+
+    @mcp.tool()
+    async def cancel_action() -> ActionResult:
+        """Cancel any ongoing arm gesture and return arms to default position."""
+        msg = await _run_sync(controller.cancel_action)
+        return ActionResult(message=msg)
+
+    @mcp.tool()
+    async def execute_arm_command(command_name: str) -> ActionResult:
+        """Execute a named arm gesture.
+
+        Valid names: high_wave, shake_hand, clap, high_five, hug, hands_up,
+                     face_wave, arm_heart, right_heart, reject, right_hand_up,
+                     x_ray, two_hand_kiss, left_kiss, right_kiss, cancel_action
+        """
+        msg = await _run_sync(controller.execute_arm_command, command_name)
+        return ActionResult(message=msg)
+
+    @mcp.tool()
+    async def execute_mode_command(mode_name: str) -> ActionResult:
+        """Switch G1 locomotion FSM mode by name.
+
+        Valid modes: walk, run, walk_waist, stand_up, stand_down, damp, sit, zero_torque
+        """
+        msg = await _run_sync(controller.execute_mode_command, mode_name)
         return ActionResult(message=msg)
 
     @mcp.tool()

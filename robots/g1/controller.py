@@ -1,380 +1,443 @@
 """
 robots/g1/controller.py
 -----------------------
-G1 humanoid robot controller.
+G1 humanoid robot controller — WebRTC transport.
 
-Pattern inspired by DimOS's G1 DDS path:
-  - Uses Unitree SDK2 Python (unitree_sdk2py) over DDS
-  - Requires network interface (e.g. "eth0") rather than IP for DDS transport
-    - MotionSwitcherClient + LocoClient for movement and posture commands
-  - LowState subscription for battery/IMU/motor states
+Connects to the G1's main controller board at 192.168.123.161 using the
+unitree_webrtc_connect library (unitree-webrtc-connect-leshy on PyPI),
+the same transport used by the Go2 controller.
 
-Install: pip install unitree_sdk2py
+Connection sequence (DimOS pattern):
+  1. WebRTC connect to 192.168.123.161 port 8081
+  2. disableTrafficSaving(True)
+  3. publish_request_new("rt/api/motion_switcher/request",
+                         {"api_id": 1002, "parameter": {"name": "ai"}})
+     REQUIRED: switches from Developer mode → AI mode.
+     Without this, ALL motion commands are silently ignored.
+
+Motion commands:
+  Movement  : "rt/wirelesscontroller"  {"lx": -vy, "ly": vx, "rx": -vyaw, "ry": 0}
+              published every 0.05 s for the requested duration, then zeros.
+  Arm       : "rt/api/arm/request"     {"api_id": 7106, "parameter": {"data": action_id}}
+  Posture   : "rt/api/sport/request"   {"api_id": 7101, "parameter": {"data": fsm_id}}
+  Balance   : "rt/api/sport/request"   {"api_id": 7102, "parameter": {"data": balance_mode}}
+
+Network:
+  192.168.123.161  Main controller — WebRTC signaling, motion commands
+  192.168.123.164  PC4 / Jetson    — SSH only, no motion
 
 Environment:
-    G1_ROBOT_IP       : Robot identifier (optional, not used by DDS)
-    G1_NETWORK_INTERFACE : Network interface name (default: eth0)
+    G1_ROBOT_IP : Main controller IP (default: 192.168.123.161)
+    ROBOT_IP    : Fallback IP env var
 """
 
+import asyncio
 import os
-import socket
 import threading
 import time
-import traceback
 
 from robots.base import RobotController
 
+from unitree_webrtc_connect.constants import RTC_TOPIC
+from unitree_webrtc_connect.webrtc_driver import (
+    UnitreeWebRTCConnection as WebRTCConnection,
+    WebRTCConnectionMethod,
+)
+
+# ------------------------------------------------------------------
+# Arm gesture name → action ID  (DimOS / G1 SDK arm action map)
+# ------------------------------------------------------------------
+ARM_GESTURES: dict[str, int] = {
+    "two_hand_kiss": 11,
+    "left_kiss":     12,
+    "right_kiss":    13,
+    "hands_up":      15,
+    "clap":          17,
+    "high_five":     18,
+    "hug":           19,
+    "arm_heart":     20,
+    "right_heart":   21,
+    "reject":        22,
+    "right_hand_up": 23,
+    "x_ray":         24,
+    "face_wave":     25,
+    "high_wave":     26,
+    "shake_hand":    27,
+    "cancel_action": 99,
+    "release_arm":   99,
+}
+
+# ------------------------------------------------------------------
+# Sport API IDs for rt/api/sport/request
+# ------------------------------------------------------------------
+_SPORT_SET_FSM = 7101   # set FSM state (posture / locomotion mode)
+_SPORT_SET_BAL = 7102   # set balance mode
+_ARM_EXECUTE   = 7106   # rt/api/arm/request — execute arm action
+_MODE_SWITCH   = 1002   # rt/api/motion_switcher/request — select mode
+
+# FSM state IDs for _SPORT_SET_FSM
+_FSM_DAMP     = 1
+_FSM_SIT      = 3
+_FSM_STAND_UP = 706   # Squat → StandUp
+_FSM_WALK     = 500
+_FSM_RUN      = 801
+
 
 class G1Controller(RobotController):
-    """G1 humanoid controller via Unitree SDK2 DDS."""
+    """G1 humanoid controller via WebRTC (unitree_webrtc_connect_leshy)."""
 
     def __init__(
         self,
         ip: str | None = None,
-        network_interface: str | None = None,
+        network_interface: str | None = None,  # accepted but unused (WebRTC uses IP)
+        **_kwargs,
     ):
-        self.ip = ip or os.getenv("G1_ROBOT_IP")
-        self.network_interface = network_interface or os.getenv("G1_NETWORK_INTERFACE")
+        self.ip = ip or os.getenv("G1_ROBOT_IP") or os.getenv("ROBOT_IP", "192.168.123.161")
 
-        self._connected = False
-        self._lock = threading.Lock()
-        self._loco_client = None
-        self._motion_switcher = None
-        self._low_state_sub = None
-        self._latest_low_state = None
+        self._conn = None
+        self._loop = None
+        self._thread = None
+        self._task = None
 
-    def _available_interfaces(self) -> list[str]:
-        try:
-            names = [name for _, name in socket.if_nameindex()]
-        except Exception:
-            names = []
-        return sorted(names)
+        self._connection_ready = threading.Event()
+        self._connection_error: str | None = None
 
-    def _resolve_network_interface(self) -> str | None:
-        available = self._available_interfaces()
+        self._latest_low_state: dict | None = None
 
-        if self.network_interface:
-            return self.network_interface if self.network_interface in available else None
-
-        # Prefer common wired interface names first.
-        for preferred in ("eth0", "enp0s31f6", "enp0s25", "eno1"):
-            if preferred in available:
-                return preferred
-
-        # Otherwise choose the first non-loopback interface.
-        for name in available:
-            if name != "lo":
-                return name
-
-        return None
 
     # ------------------------------------------------------------------
-    # RobotController interface (from robots/base.py)
+    # RobotController interface
     # ------------------------------------------------------------------
 
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        return self._conn is not None
 
     def connect(self) -> str:
-        """Initialize DDS and connect to G1."""
-        self._connected = False
-        self._loco_client = None
-        self._motion_switcher = None
-        self._low_state_sub = None
+        """Connect to G1 via WebRTC and activate AI mode."""
+        self._conn = WebRTCConnection(
+            WebRTCConnectionMethod.LocalSTA,
+            ip=self.ip,
+        )
+        self._connection_ready.clear()
+        self._connection_error = None
+        self._loop = asyncio.new_event_loop()
 
-        try:
-            import unitree_sdk2py.core.channel as channel_mod
-            from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
-                MotionSwitcherClient,
-            )
-            from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
-
-            # Initialize DDS transport layer (DimOS-style: with iface + fallback).
-            # IMPORTANT: do not silently swallow failures here — otherwise
-            # downstream SDK calls fail with opaque errors like NoneType._ref.
-            requested_nic = (self.network_interface or "").strip()
-            nic = self._resolve_network_interface()
-            dds_errors: list[str] = []
-
-            if requested_nic and nic is None:
-                return (
-                    f"G1 connect failed: network interface '{requested_nic}' not found. "
-                    f"Available: {', '.join(self._available_interfaces()) or '(none)'}"
-                )
-
-            dds_ok = False
-            used_nic = "default"
-
-            if nic:
-                try:
-                    channel_mod.ChannelFactoryInitialize(0, nic)
-                    dds_ok = True
-                    used_nic = nic
-                except Exception as e:
-                    msg = str(e).lower()
-                    # If already initialized, proceed.
-                    if "already" in msg or "init" in msg and "once" in msg:
-                        dds_ok = True
-                        used_nic = nic
-                    else:
-                        dds_errors.append(f"iface={nic}: {type(e).__name__}: {e}")
-
-            if not dds_ok:
-                try:
-                    channel_mod.ChannelFactoryInitialize(0)
-                    dds_ok = True
-                    used_nic = "default"
-                except Exception as e:
-                    msg = str(e).lower()
-                    if "already" in msg or "init" in msg and "once" in msg:
-                        dds_ok = True
-                        used_nic = "default"
-                    else:
-                        dds_errors.append(f"iface=default: {type(e).__name__}: {e}")
-
-            if not dds_ok:
-                return (
-                    "G1 connect failed at ChannelFactoryInitialize: "
-                    + " | ".join(dds_errors)
-                )
-
-            # Motion switcher is helpful but treated as optional because some SDK
-            # builds throw opaque C-extension errors (e.g. NoneType _ref) here.
+        async def _async_connect():
             try:
-                self._motion_switcher = MotionSwitcherClient()
-                self._motion_switcher.SetTimeout(5.0)
-                self._motion_switcher.Init()
+                connect_task = asyncio.create_task(self._conn.connect())
+                while not hasattr(self._conn, "video"):
+                    if connect_task.done():
+                        break
+                    await asyncio.sleep(0.01)
+                await connect_task
 
-                status, result = self._motion_switcher.CheckMode()
-                while status == 0 and result and result.get("name"):
-                    self._motion_switcher.ReleaseMode()
-                    status, result = self._motion_switcher.CheckMode()
-                    time.sleep(1.0)
+                self._conn.video.switchVideoChannel(True)
+                await self._conn.datachannel.disableTrafficSaving(True)
+                self._conn.datachannel.set_decoder(decoder_type="native")
+
+                # CRITICAL: switch from Developer → AI mode.
+                # Without this, all motion commands are silently ignored.
+                await self._conn.datachannel.pub_sub.publish_request_new(
+                    "rt/api/motion_switcher/request",
+                    {"api_id": _MODE_SWITCH, "parameter": {"name": "ai"}},
+                )
+
+                # Subscribe to LOW_STATE for battery / IMU telemetry.
+                self._conn.datachannel.pub_sub.subscribe(
+                    RTC_TOPIC["LOW_STATE"], self._on_low_state
+                )
+
+                self._connection_ready.set()
+                while True:
+                    await asyncio.sleep(1)
+
+            except asyncio.CancelledError:
+                raise
+            except BaseException as e:
+                self._connection_error = f"Connect failed: {e}"
+                self._connection_ready.set()
+                self._conn = None
+
+        def _start_loop():
+            asyncio.set_event_loop(self._loop)
+            self._task = self._loop.create_task(_async_connect())
+            self._loop.run_forever()
+
+        self._thread = threading.Thread(target=_start_loop, daemon=True)
+        self._thread.start()
+
+        connected = self._connection_ready.wait(timeout=15)  # WebRTC takes a few seconds
+
+        if connected:
+            if self._connection_error:
+                return self._connection_error
+            return f"Connected to G1 at {self.ip} (AI mode active)"
+
+        # Timed out — clean up.
+        if self._task:
+            self._loop.call_soon_threadsafe(self._task.cancel)
+        if self._conn:
+            async def _cleanup():
+                await self._conn.disconnect()
+            try:
+                asyncio.run_coroutine_threadsafe(_cleanup(), self._loop).result(timeout=2)
             except Exception:
-                # Non-fatal; locomotion may still work without explicit release.
-                self._motion_switcher = None
+                pass
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=2)
+        self._conn = self._loop = self._thread = self._task = None
+        return (
+            f"Connection timeout to G1 at {self.ip}. "
+            "Check: Ethernet cable connected, "
+            "IP 192.168.123.100/24 set on enp2s0, "
+            "WebRTC port 8081 reachable (robot must be in Sport mode)."
+        )
 
-            # Create G1 locomotion client (not Go2 SportClient)
-            try:
-                self._loco_client = LocoClient()
-                self._loco_client.SetTimeout(10.0)
-                self._loco_client.Init()
-            except Exception as e:
-                return (
-                    "G1 connect failed at LocoClient.Init: "
-                    f"{type(e).__name__}: {e} (dds_interface={used_nic})"
-                )
-
-            # Subscribe to low state. Try unitree_hg first (DimOS wholebody path),
-            # then fallback to unitree_go for SDK variants.
-            lowstate_error = None
-            for import_path in (
-                "unitree_sdk2py.idl.unitree_hg.msg.dds_",
-                "unitree_sdk2py.idl.unitree_go.msg.dds_",
-            ):
-                try:
-                    module = __import__(import_path, fromlist=["LowState_"])
-                    LowState_ = getattr(module, "LowState_")
-                    self._low_state_sub = channel_mod.ChannelSubscriber("rt/lowstate", LowState_)
-                    self._low_state_sub.Init(self._on_low_state, 10)
-                    lowstate_error = None
-                    break
-                except Exception as e:
-                    lowstate_error = f"{import_path}: {type(e).__name__}: {e}"
-
-            if lowstate_error is not None:
-                return f"G1 connect failed at lowstate subscription: {lowstate_error}"
-
-            self._connected = True
-            return f"Connected to G1 via DDS interface={used_nic}"
-
-        except ImportError:
-            return "unitree_sdk2py not installed. Run: pip install unitree_sdk2py"
-        except Exception as e:
-            self._connected = False
-            return (
-                f"G1 connect failed: {type(e).__name__}: {e}. "
-                f"Trace: {traceback.format_exc(limit=1).strip()}"
-            )
 
     def disconnect(self) -> None:
         """Cleanly disconnect from G1."""
-        self._connected = False
-        self._loco_client = None
-        self._motion_switcher = None
-        self._low_state_sub = None
+        if not self._loop or not self._thread:
+            self._conn = None
+            self._connection_ready.clear()
+            return
+
+        if self._task:
+            self._loop.call_soon_threadsafe(self._task.cancel)
+
+        if self._conn:
+            async def _async_disconnect():
+                await self._conn.disconnect()
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    _async_disconnect(), self._loop
+                ).result(timeout=3)
+            except Exception:
+                pass
+
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=5)
+
+        self._conn = self._loop = self._thread = self._task = None
         self._latest_low_state = None
+        self._connection_ready.clear()
+
+    # ------------------------------------------------------------------
+    # Telemetry
+    # ------------------------------------------------------------------
 
     def get_battery(self) -> dict | str:
-        """Get G1 battery state.
-        
-        NOTE: G1 humanoid uses unitree_hg IDL which does NOT include battery fields
-        in rt/lowstate. Battery telemetry would require a separate BMS topic subscription.
-        For now, return placeholder values based on motor voltages (averaged motor supply voltage).
-        """
-        state = self._require_low_state()
-        if isinstance(state, str):
-            return state
-        try:
-            # unitree_hg.LowState_ does NOT have bms_state, power_v, power_a fields.
-            # Instead, use motor voltages as proxy for system power status.
-            if hasattr(state, 'motor_state') and state.motor_state:
-                voltages = [m.vol for m in state.motor_state if hasattr(m, 'vol') and m.vol > 0]
-                avg_v = sum(voltages) / len(voltages) if voltages else 0.0
-            else:
-                avg_v = 0.0
-            
-            return {
-                "soc_percent": 85,  # Placeholder (would need separate BMS topic)
-                "voltage_v": round(avg_v, 3),
-                "current_a": 0.0,  # Placeholder (would need separate BMS topic)
-            }
-        except Exception as e:
-            return f"Failed to read G1 battery: {e}"
+        """Read battery state from LOW_STATE."""
+        state, err = self._require_low_state()
+        if err:
+            return err
+        bms = state.get("bms_state", {})
+        return {
+            "soc_percent": bms.get("soc"),
+            "voltage_v":   round(state.get("power_v", 0.0), 3),
+            "current_a":   bms.get("current"),
+            "cycle_count": bms.get("cycle"),
+        }
 
+    def get_imu(self) -> dict | str:
+        """Read IMU state (roll, pitch, yaw, accelerations) from LOW_STATE."""
+        state, err = self._require_low_state()
+        if err:
+            return err
+        imu = state.get("imu_state", {})
+        rpy = imu.get("rpy", [0.0, 0.0, 0.0])
+        acc = imu.get("accelerometer", [0.0, 0.0, 0.0])
+        return {
+            "roll_rad":  round(rpy[0], 5) if len(rpy) > 0 else 0.0,
+            "pitch_rad": round(rpy[1], 5) if len(rpy) > 1 else 0.0,
+            "yaw_rad":   round(rpy[2], 5) if len(rpy) > 2 else 0.0,
+            "acc_x": round(acc[0], 5) if len(acc) > 0 else 0.0,
+            "acc_y": round(acc[1], 5) if len(acc) > 1 else 0.0,
+            "acc_z": round(acc[2], 5) if len(acc) > 2 else 0.0,
+        }
 
     # ------------------------------------------------------------------
     # Posture & locomotion
     # ------------------------------------------------------------------
 
-    def stand_up(self) -> str:
-        """Command G1 to stand up."""
+    def _publish_sport(self, api_id: int, data: int) -> str | None:
+        """Send a sport API request; returns error string on failure, None on success."""
         err = self._require_connected()
         if err:
             return err
+
+        async def _coro():
+            await self._conn.datachannel.pub_sub.publish_request_new(
+                "rt/api/sport/request",
+                {"api_id": api_id, "parameter": {"data": data}},
+            )
+
         try:
-            self._loco_client.StandUp()
-            return "Standing up"
+            asyncio.run_coroutine_threadsafe(_coro(), self._loop).result(timeout=5)
+            return None
         except Exception as e:
-            return f"stand_up failed: {type(e).__name__}: {e}"
+            return f"sport api_id={api_id} data={data} failed: {e}"
+
+    def stand_up(self) -> str:
+        return self._publish_sport(_SPORT_SET_FSM, _FSM_STAND_UP) or "Standing up"
 
     def stand_down(self) -> str:
-        """Command G1 to stand down / sit."""
-        err = self._require_connected()
-        if err:
-            return err
-        try:
-            self._loco_client.StandDown()
-            return "Standing down"
-        except Exception as e:
-            return f"stand_down failed: {type(e).__name__}: {e}"
+        return self._publish_sport(_SPORT_SET_FSM, _FSM_SIT) or "Sitting down"
 
-    def move(self, vx: float, vy: float, vyaw: float) -> str:
-        """Send a continuous velocity command to G1.
+    def balance_stand(self) -> str:
+        return self._publish_sport(_SPORT_SET_BAL, 1) or "Balance stand activated"
 
-        Args:
-            vx:   Forward (+) / backward (-) velocity in m/s.
-            vy:   Left (+) / right (-) lateral velocity in m/s.
-            vyaw: Counter-clockwise (+) yaw rate in rad/s.
+    def damp(self) -> str:
+        return self._publish_sport(_SPORT_SET_FSM, _FSM_DAMP) or "Damping mode activated"
+
+    def move(self, vx: float, vy: float, vyaw: float, duration: float = 2.0) -> str:
+        """Send continuous velocity for `duration` seconds via the virtual joystick.
+
+        DimOS coordinate mapping:
+            lx = -vy   (strafe: right is negative)
+            ly =  vx   (forward: positive)
+            rx = -vyaw (yaw: clockwise is negative)
         """
         err = self._require_connected()
         if err:
             return err
+
+        async def _coro():
+            t_end = self._loop.time() + duration
+            while self._loop.time() < t_end:
+                self._conn.datachannel.pub_sub.publish_without_callback(
+                    "rt/wirelesscontroller",
+                    data={"lx": -vy, "ly": vx, "rx": -vyaw, "ry": 0.0},
+                )
+                await asyncio.sleep(0.05)
+            # Send zeros to stop.
+            self._conn.datachannel.pub_sub.publish_without_callback(
+                "rt/wirelesscontroller",
+                data={"lx": 0.0, "ly": 0.0, "rx": 0.0, "ry": 0.0},
+            )
+
         try:
-            self._loco_client.Move(vx, vy, vyaw)
-            return f"Moving: vx={vx} m/s, vy={vy} m/s, vyaw={vyaw} rad/s"
+            asyncio.run_coroutine_threadsafe(_coro(), self._loop).result(
+                timeout=duration + 5
+            )
+            return f"Moved: vx={vx} vy={vy} vyaw={vyaw} for {duration}s"
         except Exception as e:
-            return f"move failed: {type(e).__name__}: {e}"
+            return f"move failed: {e}"
 
     def stop(self) -> str:
-        """Stop all G1 movement."""
+        """Send zero velocity to halt movement."""
         err = self._require_connected()
         if err:
             return err
+
+        async def _coro():
+            self._conn.datachannel.pub_sub.publish_without_callback(
+                "rt/wirelesscontroller",
+                data={"lx": 0.0, "ly": 0.0, "rx": 0.0, "ry": 0.0},
+            )
+
         try:
-            self._loco_client.StopMove()
+            asyncio.run_coroutine_threadsafe(_coro(), self._loop).result(timeout=3)
             return "Stopped"
         except Exception as e:
-            return f"stop failed: {type(e).__name__}: {e}"
+            return f"stop failed: {e}"
 
-    def balance_stand(self) -> str:
-        """Switch G1 into balanced standing posture."""
+    # ------------------------------------------------------------------
+    # Arm gestures  (rt/api/arm/request  api_id=7106)
+    # ------------------------------------------------------------------
+
+    def execute_arm_command(self, command_name: str) -> str:
+        """Execute a named arm gesture.
+
+        Valid names: high_wave, shake_hand, clap, high_five, hug, hands_up,
+                     face_wave, arm_heart, right_heart, reject, right_hand_up,
+                     x_ray, two_hand_kiss, left_kiss, right_kiss, cancel_action
+        """
+        key = command_name.lower().replace(" ", "_").replace("-", "_")
+        if key not in ARM_GESTURES:
+            return f"Unknown gesture '{command_name}'. Valid: {', '.join(sorted(ARM_GESTURES))}"
+        return self._execute_arm_action(ARM_GESTURES[key])
+
+    def _execute_arm_action(self, action_id: int) -> str:
         err = self._require_connected()
         if err:
             return err
-        try:
-            self._loco_client.BalanceStand()
-            return "Balance stand activated"
-        except Exception as e:
-            return f"balance_stand failed: {type(e).__name__}: {e}"
 
-    def damp(self) -> str:
-        """Put all G1 motors into damping (compliant/low-power) mode."""
-        err = self._require_connected()
-        if err:
-            return err
+        async def _coro():
+            await self._conn.datachannel.pub_sub.publish_request_new(
+                "rt/api/arm/request",
+                {"api_id": _ARM_EXECUTE, "parameter": {"data": action_id}},
+            )
+
         try:
-            self._loco_client.Damp()
-            return "Damping mode activated"
+            asyncio.run_coroutine_threadsafe(_coro(), self._loop).result(timeout=5)
+            return f"Arm action {action_id} started"
         except Exception as e:
-            return f"damp failed: {type(e).__name__}: {e}"
+            return f"arm action {action_id} failed: {e}"
 
     def wave_hand(self) -> str:
-        """Command G1 to wave its hand."""
-        err = self._require_connected()
-        if err:
-            return err
-        try:
-            self._loco_client.WaveHand()
-            return "Waving hand"
-        except Exception as e:
-            return f"wave_hand failed: {type(e).__name__}: {e}"
+        return self._execute_arm_action(ARM_GESTURES["high_wave"])
+
+    def shake_hand(self) -> str:
+        return self._execute_arm_action(ARM_GESTURES["shake_hand"])
+
+    def clap(self) -> str:
+        return self._execute_arm_action(ARM_GESTURES["clap"])
+
+    def high_five(self) -> str:
+        return self._execute_arm_action(ARM_GESTURES["high_five"])
+
+    def hug(self) -> str:
+        return self._execute_arm_action(ARM_GESTURES["hug"])
+
+    def hands_up(self) -> str:
+        return self._execute_arm_action(ARM_GESTURES["hands_up"])
+
+    def cancel_action(self) -> str:
+        return self._execute_arm_action(ARM_GESTURES["cancel_action"])
 
     # ------------------------------------------------------------------
-    # Telemetry — IMU
+    # Mode commands  (generic, rt/api/sport/request api_id=7101)
     # ------------------------------------------------------------------
 
-    def get_imu(self) -> dict | str:
-        """Read IMU state from rt/lowstate: roll, pitch, yaw and linear accelerations."""
-        state = self._require_low_state()
-        if isinstance(state, str):
-            return state
-        try:
-            imu = state.imu_state
-            rpy = list(imu.rpy) if hasattr(imu, "rpy") else [0.0, 0.0, 0.0]
-            acc = list(imu.accelerometer) if hasattr(imu, "accelerometer") else [0.0, 0.0, 0.0]
-            return {
-                "roll_rad": round(rpy[0], 5),
-                "pitch_rad": round(rpy[1], 5),
-                "yaw_rad": round(rpy[2], 5),
-                "acc_x": round(acc[0], 5),
-                "acc_y": round(acc[1], 5),
-                "acc_z": round(acc[2], 5),
-            }
-        except Exception as e:
-            return f"Failed to read G1 IMU: {e}"
+    def execute_mode_command(self, mode_name: str) -> str:
+        """Switch locomotion FSM mode by name.
+
+        Valid modes: walk, run, walk_waist, stand_up, stand_down, damp, sit, zero_torque
+        """
+        modes = {
+            "zero_torque": 0,
+            "damp":        _FSM_DAMP,
+            "sit":         _FSM_SIT,
+            "stand_up":    _FSM_STAND_UP,
+            "stand_down":  _FSM_SIT,
+            "walk":        _FSM_WALK,
+            "walk_waist":  501,
+            "run":         _FSM_RUN,
+        }
+        key = mode_name.lower().replace(" ", "_").replace("-", "_")
+        if key not in modes:
+            return f"Unknown mode '{mode_name}'. Valid: {', '.join(sorted(modes))}"
+        return self._publish_sport(_SPORT_SET_FSM, modes[key]) or f"Mode '{mode_name}' activated"
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _on_low_state(self, msg: dict) -> None:
+        self._latest_low_state = msg.get("data", {})
+
     def _require_connected(self) -> str | None:
-        """Return an error string if not connected, else None."""
-        if not self._connected or self._loco_client is None:
+        if not self._conn:
             return "Not connected. Call connect() first."
         return None
 
-    def _on_low_state(self, msg) -> None:
-        """LowState subscriber callback."""
-        with self._lock:
-            self._latest_low_state = msg
-
-    def _require_low_state(self, timeout: float = 5.0):
-        """Wait for and return the latest low state message.
-
-        DDS discovery after connect() can take several seconds before the first
-        rt/lowstate message arrives.  5 s is a safe default.
-        """
-        if not self._connected:
-            return "Not connected"
-        deadline = time.time() + timeout
+    def _require_low_state(self) -> tuple:
+        if not self._conn:
+            return None, "Not connected"
+        deadline = time.time() + 2.0
         while self._latest_low_state is None and time.time() < deadline:
             time.sleep(0.05)
         if self._latest_low_state is None:
-            return (
-                f"No low state data received within {timeout:.0f}s. "
-                "Check DDS network interface and that the robot is powered on."
-            )
-        with self._lock:
-            return self._latest_low_state
+            return None, "No LOW_STATE data received (check robot is powered on)"
+        return self._latest_low_state, None

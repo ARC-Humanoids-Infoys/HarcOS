@@ -11,6 +11,9 @@ def __getattr__(name):
     if name == "Go2Client":
         from clients.go2 import Go2Client
         return Go2Client
+    if name == "HarcMcpClient":
+        from clients.mcp_client import HarcMcpClient
+        return HarcMcpClient
     raise AttributeError(f"module 'clients' has no attribute {name!r}")
 
-__all__ = ["RobotClientConfig", "RobotClient", "G1Client", "Go2Client"]
+__all__ = ["RobotClientConfig", "RobotClient", "G1Client", "Go2Client", "HarcMcpClient"]

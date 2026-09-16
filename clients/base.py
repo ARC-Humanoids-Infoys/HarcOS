@@ -161,9 +161,9 @@ class RobotClient:
 
     async def _connect_http(self) -> None:
         from mcp import ClientSession
-        from mcp.client.sse import sse_client
+        from mcp.client.streamable_http import streamablehttp_client
 
-        url = f"{self.config.server_url}/sse"
+        url = f"{self.config.server_url}/mcp"
         self._exit_stack = AsyncExitStack()
 
         # Retry until the server is ready (DimOS _try_fetch_tools pattern)
@@ -171,8 +171,8 @@ class RobotClient:
         last_exc: Exception | None = None
         while True:
             try:
-                read, write = await self._exit_stack.enter_async_context(
-                    sse_client(url)
+                read, write, _ = await self._exit_stack.enter_async_context(
+                    streamablehttp_client(url)
                 )
                 self.session = await self._exit_stack.enter_async_context(
                     ClientSession(read, write)
@@ -183,9 +183,9 @@ class RobotClient:
                 last_exc = exc
                 if asyncio.get_event_loop().time() >= deadline:
                     raise RuntimeError(
-                        f"MCP SSE server not reachable at {url} "
+                        f"MCP streamable-http server not reachable at {url} "
                         f"after {self.config.tool_fetch_timeout:.0f}s. "
-                        f"Start it first: python run.py {self.config.robot} --transport sse. "
+                        f"Start it first: python run.py {self.config.robot} --transport streamable-http. "
                         f"Last error: {exc}"
                     ) from last_exc
                 await asyncio.sleep(1.0)
